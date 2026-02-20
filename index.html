@@ -1,1 +1,201 @@
-change is done in branch
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Alexis – Moro Hub AI Assistant</title>
+<style>
+  body {
+    margin: 0;
+    background: #000;
+    color: white;
+    font-family: Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #vortex {
+    width: 260px;
+    height: 260px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #444, #000);
+    animation: pulse 3s infinite ease-in-out;
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); opacity: 0.7; }
+    50% { transform: scale(1.15); opacity: 1; }
+    100% { transform: scale(1); opacity: 0.7; }
+  }
+  #status {
+    margin-top: 20px;
+    font-size: 20px;
+    opacity: 0.8;
+    text-align: center;
+    max-width: 90vw;
+  }
+  .btn {
+    margin-top: 16px;
+    padding: 14px 26px;
+    font-size: 16px;
+    border: none;
+    border-radius: 10px;
+    background: #1e90ff;
+    color: white;
+    cursor: pointer;
+  }
+  #connectBtn { background: #16a34a; } /* green */
+  #speakBtn   { background: #1e90ff; } /* blue  */
+  .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+</style>
+</head>
+<body>
+  <div id="vortex"></div>
+  <div id="status">Click “Connect to Agent”, then “Press to Speak”.</div>
+ 
+  <!-- Connect to Agent (signed URL via Flask) -->
+  <button id="connectBtn" class="btn">🔌 Connect to Agent</button>
+ 
+  <!-- One-shot STT -->
+  <button id="speakBtn" class="btn">🎤 Press to Speak</button>
+ 
+  <script>
+    const statusEl   = document.getElementById("status");
+    const connectBtn = document.getElementById("connectBtn");
+    const speakBtn   = document.getElementById("speakBtn");
+ 
+    // Use your actual agent id here (we used the one you tested earlier)
+    const AGENT_ID = "agent_1401kh3ymdpqfg9b320m396cxbk2";
+ 
+    let ws = null;
+ 
+    // -----------------------------
+    //  Connect to Agent via signed URL (no API key exposed)
+    // -----------------------------
+    async function connectAgent() {
+      try {
+        connectBtn.disabled = true;
+        statusEl.textContent = "Connecting to agent...";
+        const res = await fetch(`/eleven/signed-url?agent_id=${encodeURIComponent(AGENT_ID)}`);
+        if (!res.ok) {
+          const t = await res.text();
+          console.error("Failed to get signed URL:", t);
+          statusEl.textContent = "Failed to get signed URL";
+          connectBtn.disabled = false;
+          return;
+        }
+        const { signed_url } = await res.json();
+        if (!signed_url) {
+          statusEl.textContent = "No signed URL returned";
+          connectBtn.disabled = false;
+          return;
+        }
+ 
+        ws = new WebSocket(signed_url);
+        ws.onopen    = () => { console.log("WS open via signed URL"); statusEl.textContent = "Agent connected ✅"; };
+        ws.onmessage = (ev) => { console.log("WS message:", ev.data); /* later: parse/display */ };
+        ws.onerror   = (e)  => { console.error("WS error", e); statusEl.textContent = "WS error"; };
+        ws.onclose   = (e)  => { console.log("WS closed", e.code, e.reason); statusEl.textContent = `WS closed (${e.code})`; connectBtn.disabled = false; };
+      } catch (err) {
+        console.error("Connect error:", err);
+        statusEl.textContent = "Error connecting to agent";
+        connectBtn.disabled = false;
+      }
+    }
+ 
+    // -----------------------------
+    //  One-shot STT → POST /alexis → play base64 MP3
+    // -----------------------------
+    async function pressToSpeak() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        statusEl.textContent = "Speech Recognition not supported in this browser.";
+        return;
+      }
+ 
+      statusEl.textContent = "Listening...";
+      speakBtn.disabled = true;
+ 
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = "en-US";
+ 
+      rec.onresult = async (event) => {
+        const userText = event.results[0][0].transcript;
+        console.log("Heard:", userText);
+        statusEl.textContent = `You said: ${userText}`;
+        await sendToBackend(userText);
+      };
+ 
+      rec.onerror = (e) => {
+        console.error("STT error:", e);
+        statusEl.textContent = "Speech recognition error.";
+        speakBtn.disabled = false;
+      };
+ 
+      rec.onend = () => {
+        // If no result fired, we still re-enable the button
+        if (speakBtn.disabled) speakBtn.disabled = false;
+      };
+ 
+      try {
+        rec.start(); // user gesture ensures microphone and audio policies are satisfied
+      } catch (e) {
+        console.error("Cannot start recognition:", e);
+        statusEl.textContent = "Cannot start recognition.";
+        speakBtn.disabled = false;
+      }
+    }
+ 
+    // -----------------------------
+    //  Send Text to Backend (/alexis)
+    // -----------------------------
+    async function sendToBackend(text) {
+      const url = `${window.location.origin}/alexis`;
+      statusEl.textContent = "Thinking...";
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+        const data = await response.json();
+        console.log("Backend responded:", data);
+ 
+        if (data.audio) playAudio(data.audio);
+        statusEl.textContent = data.text || "Done";
+      } catch (err) {
+        console.error("Fetch error:", err);
+        statusEl.textContent = "Error contacting server.";
+      }
+    }
+ 
+    // -----------------------------
+    //  Base64 MP3 → play()
+    // -----------------------------
+    function playAudio(base64Audio) {
+      try {
+        console.log("Playing audio, base64 length:", base64Audio.length);
+        const binary = atob(base64Audio);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "audio/mpeg" });
+        const url  = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play().catch(err => console.error("Audio play error:", err));
+      } catch (err) {
+        console.error("Audio decode error:", err);
+      }
+    }
+ 
+    // -----------------------------
+    //  Bind buttons
+    // -----------------------------
+    connectBtn.addEventListener("click", connectAgent);
+    speakBtn.addEventListener("click", pressToSpeak);
+  </script>
+</body>
+</html>
